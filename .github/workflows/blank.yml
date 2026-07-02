@@ -20,51 +20,23 @@ on:
           - 难过
 
 jobs:
-  tts:
+  # ===================== 第一个 Job：模型缓存 =====================
+  cache-models:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write      # 发布 Release 所需
-
     steps:
-      # ========== 基础环境（无需 checkout 仓库） ==========
-      - name: 安装系统依赖
-        run: |
-          sudo apt update
-          sudo apt install -y ffmpeg git git-lfs curl build-essential bc
+      - name: 安装基础工具
+        run: sudo apt update && sudo apt install -y git git-lfs curl
 
-      - name: 设置 Python 3.10
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-          cache: 'pip'
-
-      # ========== 克隆 GPT-SoVITS ==========
-      - name: 克隆 GPT-SoVITS 仓库
-        run: git clone --depth=1 https://github.com/RVC-Boss/GPT-SoVITS.git
-
-      # ========== 安装 Python 依赖 ==========
-      - name: 安装 Python 依赖（避免 torch 被覆盖）
-        run: |
-          cd GPT-SoVITS
-          # 先安装 requirements.txt 中除 torch 以外的所有包
-          grep -v 'torch' requirements.txt > requirements-no-torch.txt || true
-          pip install -r requirements-no-torch.txt
-          # 然后安装 CPU 版本 torch（防止被 GPU 版覆盖）
-          pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
-          pip install huggingface_hub transformers
-
-      # ========== 缓存预训练模型 ==========
       - name: 缓存预训练模型
         id: cache-pretrained
         uses: actions/cache@v4
         with:
-          path: ./GPT-SoVITS/pretrained_models
-          key: pretrained-models-v3
+          path: ./pretrained_models
+          key: pretrained-models-v4
 
       - name: 下载预训练模型（若缓存未命中）
         if: steps.cache-pretrained.outputs.cache-hit != 'true'
         run: |
-          cd GPT-SoVITS
           mkdir -p pretrained_models
           git lfs install
           git clone --depth=1 https://huggingface.co/hfl/chinese-roberta-wwm-ext-large pretrained_models/chinese-roberta-wwm-ext-large
@@ -74,46 +46,42 @@ jobs:
           wget -q --show-progress -O pretrained_models/s2G2333k.pth \
             https://huggingface.co/RVC-Boss/GPT-SoVITS/resolve/main/pretrained_models/s2G2333k.pth
 
-      # ========== 缓存用户 GPT 模型 ==========
       - name: 缓存 GPT 模型
         id: cache-gpt
         uses: actions/cache@v4
         with:
-          path: ./GPT-SoVITS/huangquan-e10.ckpt
-          key: huangquan-gpt-v2
+          path: ./huangquan-e10.ckpt
+          key: huangquan-gpt-v3
 
       - name: 下载 GPT 模型（若缓存未命中）
         if: steps.cache-gpt.outputs.cache-hit != 'true'
         run: |
-          wget -q --show-progress -O ./GPT-SoVITS/huangquan-e10.ckpt \
+          wget -q --show-progress -O huangquan-e10.ckpt \
             https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan-e10.ckpt
 
-      # ========== 缓存 SoVITS 模型 ==========
       - name: 缓存 SoVITS 模型
         id: cache-sovits
         uses: actions/cache@v4
         with:
-          path: ./GPT-SoVITS/huangquan_e10_s170.pth
-          key: huangquan-sovits-v2
+          path: ./huangquan_e10_s170.pth
+          key: huangquan-sovits-v3
 
       - name: 下载 SoVITS 模型（若缓存未命中）
         if: steps.cache-sovits.outputs.cache-hit != 'true'
         run: |
-          wget -q --show-progress -O ./GPT-SoVITS/huangquan_e10_s170.pth \
+          wget -q --show-progress -O huangquan_e10_s170.pth \
             https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan_e10_s170.pth
 
-      # ========== 按情绪准备参考音频（含缓存） ==========
       - name: 缓存参考音频
         id: cache-ref
         uses: actions/cache@v4
         with:
-          path: ./GPT-SoVITS/reference_audio
-          key: ref-audio-${{ inputs.emotion }}-v2
+          path: ./reference_audio
+          key: ref-audio-${{ inputs.emotion }}-v3
 
       - name: 下载参考音频（若缓存未命中）
         if: steps.cache-ref.outputs.cache-hit != 'true'
         run: |
-          cd GPT-SoVITS
           mkdir -p reference_audio
           case "${{ inputs.emotion }}" in
             "中立")
@@ -137,17 +105,76 @@ jobs:
           if [ ! -s reference_audio/ref.wav ]; then
             echo "错误：参考音频下载失败" && exit 1
           fi
-          # 将参考文本也保存到文件中，供后续使用
           echo "$REF_TEXT" > reference_audio/ref_text.txt
 
-      - name: 加载参考音频信息到环境变量
+  # ===================== 第二个 Job：合成与发布 =====================
+  synthesize:
+    needs: cache-models
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # 发布 Release 所需
+    steps:
+      - name: 安装系统依赖
+        run: |
+          sudo apt update
+          sudo apt install -y ffmpeg git git-lfs curl build-essential bc
+
+      - name: 克隆 GPT-SoVITS 仓库
+        run: git clone --depth=1 https://github.com/RVC-Boss/GPT-SoVITS.git
+
+      # ---------- 恢复所有缓存的模型 ----------
+      - name: 恢复预训练模型缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: ./GPT-SoVITS/pretrained_models
+          key: pretrained-models-v4
+
+      - name: 恢复 GPT 模型缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: ./GPT-SoVITS/huangquan-e10.ckpt
+          key: huangquan-gpt-v3
+
+      - name: 恢复 SoVITS 模型缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: ./GPT-SoVITS/huangquan_e10_s170.pth
+          key: huangquan-sovits-v3
+
+      - name: 恢复参考音频缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: ./GPT-SoVITS/reference_audio
+          key: ref-audio-${{ inputs.emotion }}-v3
+
+      # ---------- Python 环境（注意：pip 缓存依赖路径需指向 GPT‑SoVITS 内的 requirements.txt） ----------
+      - name: 设置 Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          cache-dependency-path: GPT-SoVITS/requirements.txt
+
+      - name: 安装 Python 依赖
+        run: |
+          cd GPT-SoVITS
+          # 先安装除 torch 外的所有包，防止被覆盖
+          grep -v 'torch' requirements.txt > requirements-no-torch.txt || true
+          pip install -r requirements-no-torch.txt
+          pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install huggingface_hub transformers pyyaml
+
+      # ---------- 准备参考文本 ----------
+      - name: 读取参考文本
         run: |
           cd GPT-SoVITS
           REF_TEXT=$(cat reference_audio/ref_text.txt)
-          echo "REF_TEXT=$REF_TEXT" >> $GITHUB_ENV
+          echo "REF_TEXT<<EOF" >> $GITHUB_ENV
+          echo "$REF_TEXT" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
-      # ========== 生成配置文件（安全处理 YAML） ==========
-      - name: 生成 tts_infer.yaml 配置文件
+      # ---------- 生成配置文件 ----------
+      - name: 生成 tts_infer.yaml
         run: |
           cd GPT-SoVITS
           mkdir -p configs
@@ -157,7 +184,7 @@ jobs:
               'custom': {
                   'version': 'v2',
                   'device': 'cpu',
-                  'is_half': False,   # 若内存不足可尝试改为 True，但需先测试稳定性
+                  'is_half': False,
                   'bert_base_path': 'pretrained_models/chinese-roberta-wwm-ext-large',
                   'cnhuhbert_base_path': 'pretrained_models/chinese-hubert-base',
                   't2s_weights_path': 'huangquan-e10.ckpt',
@@ -174,7 +201,7 @@ jobs:
               yaml.dump(config, f, allow_unicode=True)
           "
 
-      # ========== 启动 API 并合成（改用 POST，增加超时与重试） ==========
+      # ---------- 合成语音 ----------
       - name: 启动 API 并合成语音
         env:
           TEXT: ${{ inputs.text }}
@@ -185,7 +212,7 @@ jobs:
           API_PID=$!
           echo "API PID: $API_PID"
 
-          # 健康检查（最多等待 90 秒，避免无限等待）
+          # 健康检查（最多等待 90 秒）
           echo "等待 API 服务就绪..."
           for i in {1..90}; do
             if curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:9880/tts?text=test&text_lang=zh" 2>/dev/null | grep -q 200; then
@@ -200,14 +227,16 @@ jobs:
             exit 1
           fi
 
-          # 合成请求（使用 POST 避免 URL 过长，最多尝试 2 次）
+          # 合成请求（POST + 安全 JSON，支持长文本和特殊字符）
           set +e
           SUCCESS=0
           for attempt in 1 2; do
             echo "合成尝试 $attempt..."
+            # 使用 Python 安全构造 JSON，避免注入
+            JSON=$(python -c "import json, sys; print(json.dumps({'text': sys.argv[1], 'text_lang': 'zh'}))" "$TEXT")
             curl -X POST "http://127.0.0.1:9880/tts" \
               -H "Content-Type: application/json" \
-              -d "{\"text\": \"${TEXT}\", \"text_lang\": \"zh\"}" \
+              -d "$JSON" \
               --max-time 900 \
               --output ../output.wav
             CURL_EXIT=$?
@@ -225,21 +254,20 @@ jobs:
             exit 1
           fi
 
-          # 清理 API 进程
+          # 清理
           pkill -f api_v2.py 2>/dev/null || true
           sleep 2
-          # 校验生成文件
+
+          # 校验
           if [ ! -f ../output.wav ] || [ ! -s ../output.wav ]; then
-            echo "错误：output.wav 不存在或为空"
-            exit 1
+            echo "错误：output.wav 不存在或为空" && exit 1
           fi
-          # 检查时长（bc 已在系统依赖中安装）
           DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ../output.wav 2>/dev/null)
           if [ -z "$DURATION" ] || (( $(echo "$DURATION < 0.5" | bc -l) )); then
-            echo "警告：生成音频时长过短 ($DURATION 秒)，可能合成失败"
+            echo "警告：生成音频时长过短 ($DURATION 秒)"
           fi
 
-      # ========== 转码为 MP3 ==========
+      # ---------- 转码 MP3 ----------
       - name: 转码为 MP3
         run: |
           ffmpeg -i ./output.wav -codec:a libmp3lame -q:a 2 ./output.mp3 -y
@@ -247,39 +275,36 @@ jobs:
             echo "错误：MP3 转码失败" && exit 1
           fi
 
-      # ========== 上传产物 (Artifact) ==========
+      # ---------- 上传 Artifact ----------
       - name: 上传音频文件 (Artifact)
         uses: actions/upload-artifact@v4
         with:
           name: generated-voice
           path: ./output.mp3
 
-      # ========== 发布 Release（安全的 TAG 生成） ==========
+      # ---------- 生成安全 Tag 并发布 Release ----------
       - name: 生成版本号与 Tag
         id: version
         run: |
           TIMESTAMP=$(date +"%Y%m%d%H%M%S")
-          EMOTION_EN=""
           case "${{ inputs.emotion }}" in
             "中立") EMOTION_EN="neutral" ;;
             "开心") EMOTION_EN="happy" ;;
             "生气") EMOTION_EN="angry" ;;
             "难过") EMOTION_EN="sad" ;;
           esac
-          # 将文本清理为安全的 slug：只保留字母、数字、下划线、连字符，并截断
-          SAFE_TEXT=$(echo "${{ inputs.text }}" | python -c "
-          import sys, re
-          raw = sys.stdin.read()
-          # 移除控制字符，替换空格为下划线
+          # 安全 slug：从环境变量读取文本，避免注入
+          SAFE_TEXT=$(python -c "
+          import sys, re, os
+          raw = os.environ['TEXT']
           slug = re.sub(r'\s+', '_', raw)
-          # 去掉除字母数字、中文、下划线、连字符以外的字符
           slug = re.sub(r'[^\w\-]', '', slug, flags=re.UNICODE)
-          # 截取前 20 个字符
-          slug = slug[:20]
-          print(slug)
+          print(slug[:20])
           ")
           echo "VERSION=v1.0.0+$TIMESTAMP-$EMOTION_EN-$SAFE_TEXT" >> $GITHUB_ENV
           echo "TAG=tts-$EMOTION_EN-$TIMESTAMP-$SAFE_TEXT" >> $GITHUB_ENV
+        env:
+          TEXT: ${{ inputs.text }}
 
       - name: 创建 Release
         env:
