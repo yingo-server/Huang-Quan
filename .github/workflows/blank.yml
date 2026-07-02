@@ -83,7 +83,7 @@ jobs:
           if [ ! -s reference_audio/ref.wav ]; then echo "参考音频下载失败" && exit 1; fi
           echo "$REF_TEXT" > reference_audio/ref_text.txt
 
-      # 只有以上步骤全部成功，才保存缓存
+      # 只有以上步骤全部成功，才保存缓存（使用静态 key，避免 hashFiles 缺失）
       - name: 保存完整环境缓存
         if: success()
         uses: actions/cache/save@v4
@@ -91,7 +91,7 @@ jobs:
           path: |
             ./GPT-SoVITS
             ./venv
-          key: tts-env-v1-${{ runner.os }}-${{ hashFiles('GPT-SoVITS/requirements.txt') }}
+          key: tts-env-v1
 
   # ==================== Job 2：纯合成，允许失败 ====================
   synthesize:
@@ -109,7 +109,7 @@ jobs:
           path: |
             ./GPT-SoVITS
             ./venv
-          key: tts-env-v1-${{ runner.os }}-${{ hashFiles('GPT-SoVITS/requirements.txt') }}
+          key: tts-env-v1
 
       - name: 读取参考文本到环境变量
         run: |
@@ -196,6 +196,7 @@ jobs:
       - name: 生成安全 Tag 并发布 Release
         env:
           TEXT: ${{ inputs.text }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TIMESTAMP=$(date +"%Y%m%d%H%M%S")
           case "${{ inputs.emotion }}" in
@@ -224,5 +225,3 @@ jobs:
           - **生成时间**：$DATE
           EOF
           gh release create "$TAG" ./output.mp3 --title "$VERSION" --notes-file notes.txt --target ${{ github.sha }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
