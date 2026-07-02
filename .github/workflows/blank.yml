@@ -1,0 +1,133 @@
+name: 生成黄泉 TTS 语音 (GPT-SoVITS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      text:
+        description: '要合成的台词文本'
+        required: true
+        default: '败者成灰，胜者为王'
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      # ---------- 系统依赖 ----------
+      - name: 安装系统依赖
+        run: |
+          sudo apt update
+          sudo apt install -y ffmpeg git
+
+      # ---------- Python 环境 ----------
+      - name: 设置 Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 缓存 pip 包
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-cache-${{ runner.os }}-v1
+
+      - name: 克隆 GPT-SoVITS 仓库并安装依赖
+        run: |
+          git clone --depth=1 https://github.com/RVC-Boss/GPT-SoVITS.git
+          cd GPT-SoVITS
+          # 安装 CPU 版本的 PyTorch[reference:6]
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      # ---------- 下载模型 ----------
+      - name: 下载 GPT 模型 (.ckpt)
+        id: cache-gpt
+        uses: actions/cache@v4
+        with:
+          path: ./GPT-SoVITS/huangquan-e10.ckpt
+          key: huangquan-gpt-v1
+
+      - name: 下载 GPT 模型 (若缓存未命中)
+        if: steps.cache-gpt.outputs.cache-hit != 'true'
+        run: |
+          wget -q --show-progress -O ./GPT-SoVITS/huangquan-e10.ckpt \
+            https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan-e10.ckpt
+
+      - name: 下载 SoVITS 模型 (.pth)
+        id: cache-sovits
+        uses: actions/cache@v4
+        with:
+          path: ./GPT-SoVITS/huangquan_e10_s170.pth
+          key: huangquan-sovits-v1
+
+      - name: 下载 SoVITS 模型 (若缓存未命中)
+        if: steps.cache-sovits.outputs.cache-hit != 'true'
+        run: |
+          wget -q --show-progress -O ./GPT-SoVITS/huangquan_e10_s170.pth \
+            https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan_e10_s170.pth
+
+      # ---------- 修改配置，强制使用 CPU ----------
+      - name: 修改配置以使用 CPU
+        run: |
+          cd GPT-SoVITS
+          # 在 config.py 中，将 use_cuda 设置为 False[reference:7]
+          sed -i 's/use_cuda = True/use_cuda = False/g' config.py
+
+      # ---------- 运行 TTS 推理 ----------
+      - name: 运行 TTS 合成
+        env:
+          TEXT: ${{ inputs.text }}
+        run: |
+          cd GPT-SoVITS
+          python inference_main.py \
+            --model_path ./huangquan-e10.ckpt \
+            --sovits_path ./huangquan_e10_s170.pth \
+            --text "$TEXT" \
+            --output_path ../output.wav
+
+      # ---------- 转码为 MP3 ----------
+      - name: 转码为 MP3
+        run: |
+          if [ ! -f ./output.wav ] || [ ! -s ./output.wav ]; then
+            echo "错误：合成未生成有效的输出文件" && exit 1
+          fi
+          echo "转换 WAV 为 MP3..."
+          ffmpeg -i ./output.wav -codec:a libmp3lame -q:a 2 ./output.mp3 -y
+          ls -lh ./output.mp3
+
+      # ---------- 发布 Release ----------
+      - name: 生成版本号
+        env:
+          TEXT: ${{ inputs.text }}
+        run: |
+          TIMESTAMP=$(date +"%Y%m%d%H%M%S")
+          TEXT_SUFFIX=$(echo "$TEXT" | tr -cd '[:alnum:]_-' | head -c 16)
+          [ -z "$TEXT_SUFFIX" ] && TEXT_SUFFIX="voice"
+          echo "VERSION=[BOT][$TIMESTAMP][$TEXT]" >> $GITHUB_ENV
+          echo "TAG=tts-output-$TIMESTAMP-$TEXT_SUFFIX" >> $GITHUB_ENV
+
+      - name: 创建 Release
+        env:
+          TAG: ${{ env.TAG }}
+          VERSION: ${{ env.VERSION }}
+          TEXT: ${{ inputs.text }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > notes.txt << 'EOF'
+          自动生成于 $(date '+%Y-%m-%d %H:%M:%S')
+          文字：$TEXT
+          模型：黄泉 (GPT-SoVITS)
+          引擎：GPT-SoVITS (CPU)
+          EOF
+          envsubst < notes.txt > notes_expanded.txt
+          gh release create "$TAG" \
+            ./output.mp3 \
+            --title "$VERSION" \
+            --notes-file notes_expanded.txt \
+            --target ${{ github.sha }}
