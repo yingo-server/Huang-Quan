@@ -31,23 +31,23 @@ jobs:
           path: |
             ./venv
             ./GPT-SoVITS
-          key: tts-base-v6
+          key: tts-base-v7
 
-      - name: 安装系统工具（缓存未命中时）
+      - name: 安装系统工具（缓存未命中）
         if: steps.cache-base.outputs.cache-hit != 'true'
         run: sudo apt update && sudo apt install -y git git-lfs curl
 
-      - name: 设置 Python 3.10（缓存未命中时）
+      - name: 设置 Python 3.10（缓存未命中）
         if: steps.cache-base.outputs.cache-hit != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: 克隆 GPT-SoVITS（缓存未命中时）
+      - name: 克隆 GPT-SoVITS（缓存未命中）
         if: steps.cache-base.outputs.cache-hit != 'true'
         run: git clone --depth=1 https://github.com/RVC-Boss/GPT-SoVITS.git
 
-      - name: 创建虚拟环境并安装依赖（缓存未命中时）
+      - name: 创建虚拟环境并安装依赖（缓存未命中）
         if: steps.cache-base.outputs.cache-hit != 'true'
         run: |
           python -m venv venv
@@ -59,52 +59,31 @@ jobs:
           pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
           pip install huggingface_hub transformers pyyaml
 
-      - name: 下载预训练模型（缓存未命中时）
+      - name: 下载预训练模型（使用官方脚本，自动适配地址）
         if: steps.cache-base.outputs.cache-hit != 'true'
         run: |
+          source venv/bin/activate
           cd GPT-SoVITS
-          mkdir -p pretrained_models
-          git lfs install
-          for i in 1 2 3; do
-            git clone --depth=1 https://huggingface.co/hfl/chinese-roberta-wwm-ext-large pretrained_models/chinese-roberta-wwm-ext-large && break
-            sleep 10
-          done
-          for i in 1 2 3; do
-            git clone --depth=1 https://huggingface.co/TencentGameMate/chinese-hubert-base pretrained_models/chinese-hubert-base && break
-            sleep 10
-          done
-          # 使用官方新地址 (lj1995)，并加固下载逻辑
-          download_and_check() {
-            local url="$1" output="$2"
-            for i in 1 2 3; do
-              curl -L --fail --retry 5 --retry-delay 5 -o "$output" "$url"
-              local size=$(stat -c%s "$output" 2>/dev/null || echo 0)
-              # 实际模型大小远超 100 MB，这里仅判断 >1 MB 防止下载到错误页面
-              if [ "$size" -gt 1048576 ]; then
-                return 0
-              fi
-              echo "下载 $output 大小异常 (${size} bytes)，重试 ($i)..."
-              sleep 10
-            done
-            return 1
-          }
-          download_and_check \
-            "https://huggingface.co/lj1995/GPT-SoVITS/resolve/main/pretrained_models/s1v3.ckpt" \
-            "pretrained_models/s1v3.ckpt"
-          download_and_check \
-            "https://huggingface.co/lj1995/GPT-SoVITS/resolve/main/pretrained_models/s2G2333k.pth" \
-            "pretrained_models/s2G2333k.pth"
+          # 官方脚本自动处理所有预训练模型下载，无需硬编码 URL
+          python tools/download_models.py
 
-      - name: 下载黄泉模型（缓存未命中时）
+      - name: 下载黄泉 GPT 模型（缓存未命中）
         if: steps.cache-base.outputs.cache-hit != 'true'
         run: |
+          source venv/bin/activate
           cd GPT-SoVITS
-          download_model() {
-            curl -L --fail --retry 5 --retry-delay 5 -o "$2" "$1"
-            [ -s "$2" ]
-          }
-          download_model "https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan-e10.ckpt" "huangquan-e10.ckpt"
-          download_model "https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan_e10_s170.pth" "huangquan_e10_s170.pth"
+          curl -L --fail --retry 5 --retry-delay 5 -o huangquan-e10.ckpt \
+            https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan-e10.ckpt
+          [ -s huangquan-e10.ckpt ] || { echo "GPT 模型下载失败"; exit 1; }
+
+      - name: 下载黄泉 SoVITS 模型（缓存未命中）
+        if: steps.cache-base.outputs.cache-hit != 'true'
+        run: |
+          source venv/bin/activate
+          cd GPT-SoVITS
+          curl -L --fail --retry 5 --retry-delay 5 -o huangquan_e10_s170.pth \
+            https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan_e10_s170.pth
+          [ -s huangquan_e10_s170.pth ] || { echo "SoVITS 模型下载失败"; exit 1; }
 
       - name: 保存通用环境缓存
         if: steps.cache-base.outputs.cache-hit != 'true' && success()
@@ -113,7 +92,7 @@ jobs:
           path: |
             ./venv
             ./GPT-SoVITS
-          key: tts-base-v6
+          key: tts-base-v7
 
       # ---------- 情绪缓存 ----------
       - name: 恢复参考音频缓存
@@ -123,7 +102,7 @@ jobs:
           path: ./GPT-SoVITS/reference_audio
           key: tts-ref-${{ inputs.emotion }}-v2
 
-      - name: 下载参考音频（缓存未命中时）
+      - name: 下载参考音频（缓存未命中）
         if: steps.cache-ref.outputs.cache-hit != 'true'
         run: |
           cd GPT-SoVITS
@@ -173,7 +152,7 @@ jobs:
           path: |
             ./venv
             ./GPT-SoVITS
-          key: tts-base-v6
+          key: tts-base-v7
 
       - name: 恢复参考音频缓存
         uses: actions/cache/restore@v4
