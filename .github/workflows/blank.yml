@@ -31,7 +31,7 @@ jobs:
           path: |
             ./venv
             ./GPT-SoVITS
-          key: tts-base-v5
+          key: tts-base-v6
 
       - name: 安装系统工具（缓存未命中时）
         if: steps.cache-base.outputs.cache-hit != 'true'
@@ -65,7 +65,6 @@ jobs:
           cd GPT-SoVITS
           mkdir -p pretrained_models
           git lfs install
-          # 带重试的克隆（已成功）
           for i in 1 2 3; do
             git clone --depth=1 https://huggingface.co/hfl/chinese-roberta-wwm-ext-large pretrained_models/chinese-roberta-wwm-ext-large && break
             sleep 10
@@ -74,13 +73,13 @@ jobs:
             git clone --depth=1 https://huggingface.co/TencentGameMate/chinese-hubert-base pretrained_models/chinese-hubert-base && break
             sleep 10
           done
-          # 使用正确的官方预训练模型地址（lj1995 仓库）
+          # 使用官方新地址 (lj1995)，并加固下载逻辑
           download_and_check() {
             local url="$1" output="$2"
             for i in 1 2 3; do
               curl -L --fail --retry 5 --retry-delay 5 -o "$output" "$url"
               local size=$(stat -c%s "$output" 2>/dev/null || echo 0)
-              # 只要大于 1 MB 即可视为有效（实际模型均 > 100 MB）
+              # 实际模型大小远超 100 MB，这里仅判断 >1 MB 防止下载到错误页面
               if [ "$size" -gt 1048576 ]; then
                 return 0
               fi
@@ -102,7 +101,7 @@ jobs:
           cd GPT-SoVITS
           download_model() {
             curl -L --fail --retry 5 --retry-delay 5 -o "$2" "$1"
-            [ -s "$2" ]  # 确保非空
+            [ -s "$2" ]
           }
           download_model "https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan-e10.ckpt" "huangquan-e10.ckpt"
           download_model "https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan_e10_s170.pth" "huangquan_e10_s170.pth"
@@ -114,7 +113,7 @@ jobs:
           path: |
             ./venv
             ./GPT-SoVITS
-          key: tts-base-v5
+          key: tts-base-v6
 
       # ---------- 情绪缓存 ----------
       - name: 恢复参考音频缓存
@@ -174,7 +173,7 @@ jobs:
           path: |
             ./venv
             ./GPT-SoVITS
-          key: tts-base-v5
+          key: tts-base-v6
 
       - name: 恢复参考音频缓存
         uses: actions/cache/restore@v4
@@ -231,7 +230,6 @@ jobs:
             fi
             sleep 1
           done
-          # 二次确认 API 可处理 POST 请求
           for i in {1..10}; do
             if curl -s -X POST "http://127.0.0.1:9880/tts" \
               -H "Content-Type: application/json" \
