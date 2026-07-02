@@ -31,7 +31,7 @@ jobs:
           path: |
             ./venv
             ./GPT-SoVITS
-          key: tts-base-v4
+          key: tts-base-v5
 
       - name: 安装系统工具（缓存未命中时）
         if: steps.cache-base.outputs.cache-hit != 'true'
@@ -53,12 +53,9 @@ jobs:
           python -m venv venv
           source venv/bin/activate
           cd GPT-SoVITS
-          # 排除 torch 相关行，避免与 CPU 版冲突
           grep -vE '^\s*torch' requirements.txt > requirements-no-torch.txt || true
           pip install -r requirements-no-torch.txt
-          # 显式安装 pytorch-lightning，防止遗漏
           pip install pytorch-lightning
-          # 安装 CPU 版 PyTorch（与 GPT‑SoVITS 兼容）
           pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
           pip install huggingface_hub transformers pyyaml
 
@@ -68,6 +65,7 @@ jobs:
           cd GPT-SoVITS
           mkdir -p pretrained_models
           git lfs install
+          # 带重试的克隆（已成功）
           for i in 1 2 3; do
             git clone --depth=1 https://huggingface.co/hfl/chinese-roberta-wwm-ext-large pretrained_models/chinese-roberta-wwm-ext-large && break
             sleep 10
@@ -76,18 +74,38 @@ jobs:
             git clone --depth=1 https://huggingface.co/TencentGameMate/chinese-hubert-base pretrained_models/chinese-hubert-base && break
             sleep 10
           done
-          curl -L --retry 5 --retry-delay 5 -o pretrained_models/s1v3.ckpt \
-            https://huggingface.co/RVC-Boss/GPT-SoVITS/resolve/main/pretrained_models/s1v3.ckpt
-          curl -L --retry 5 --retry-delay 5 -o pretrained_models/s2G2333k.pth \
-            https://huggingface.co/RVC-Boss/GPT-SoVITS/resolve/main/pretrained_models/s2G2333k.pth
+          # 使用正确的官方预训练模型地址（lj1995 仓库）
+          download_and_check() {
+            local url="$1" output="$2"
+            for i in 1 2 3; do
+              curl -L --fail --retry 5 --retry-delay 5 -o "$output" "$url"
+              local size=$(stat -c%s "$output" 2>/dev/null || echo 0)
+              # 只要大于 1 MB 即可视为有效（实际模型均 > 100 MB）
+              if [ "$size" -gt 1048576 ]; then
+                return 0
+              fi
+              echo "下载 $output 大小异常 (${size} bytes)，重试 ($i)..."
+              sleep 10
+            done
+            return 1
+          }
+          download_and_check \
+            "https://huggingface.co/lj1995/GPT-SoVITS/resolve/main/pretrained_models/s1v3.ckpt" \
+            "pretrained_models/s1v3.ckpt"
+          download_and_check \
+            "https://huggingface.co/lj1995/GPT-SoVITS/resolve/main/pretrained_models/s2G2333k.pth" \
+            "pretrained_models/s2G2333k.pth"
 
       - name: 下载黄泉模型（缓存未命中时）
         if: steps.cache-base.outputs.cache-hit != 'true'
         run: |
-          curl -L --retry 5 --retry-delay 5 -o GPT-SoVITS/huangquan-e10.ckpt \
-            https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan-e10.ckpt
-          curl -L --retry 5 --retry-delay 5 -o GPT-SoVITS/huangquan_e10_s170.pth \
-            https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan_e10_s170.pth
+          cd GPT-SoVITS
+          download_model() {
+            curl -L --fail --retry 5 --retry-delay 5 -o "$2" "$1"
+            [ -s "$2" ]  # 确保非空
+          }
+          download_model "https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan-e10.ckpt" "huangquan-e10.ckpt"
+          download_model "https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan_e10_s170.pth" "huangquan_e10_s170.pth"
 
       - name: 保存通用环境缓存
         if: steps.cache-base.outputs.cache-hit != 'true' && success()
@@ -96,7 +114,7 @@ jobs:
           path: |
             ./venv
             ./GPT-SoVITS
-          key: tts-base-v4
+          key: tts-base-v5
 
       # ---------- 情绪缓存 ----------
       - name: 恢复参考音频缓存
@@ -129,7 +147,7 @@ jobs:
               REF_TEXT="只有时常回望来时的路，我们才不会忘记自己应当前往何处…还有那些曾与我们并肩而行的人们。"
               ;;
           esac
-          curl -L --retry 5 --retry-delay 5 -o reference_audio/ref.wav "$REF_URL"
+          curl -L --fail --retry 5 --retry-delay 5 -o reference_audio/ref.wav "$REF_URL"
           if [ ! -s reference_audio/ref.wav ]; then echo "参考音频下载失败"; exit 1; fi
           echo "$REF_TEXT" > reference_audio/ref_text.txt
 
@@ -156,7 +174,7 @@ jobs:
           path: |
             ./venv
             ./GPT-SoVITS
-          key: tts-base-v4
+          key: tts-base-v5
 
       - name: 恢复参考音频缓存
         uses: actions/cache/restore@v4
@@ -206,20 +224,19 @@ jobs:
           source venv/bin/activate
           cd GPT-SoVITS
           python api_v2.py -c configs/tts_infer.yaml -a 127.0.0.1 -p 9880 > api.log 2>&1 &
-          echo "等待 API 就绪（端口监听）..."
+          echo "等待端口 9880 监听..."
           for i in {1..180}; do
             if ss -ltn | grep -q ':9880'; then
-              echo "端口 9880 已监听 (${i}s)"; break
+              echo "端口已监听 (${i}s)"; break
             fi
             sleep 1
           done
-          # 二次确认 API 可处理请求
+          # 二次确认 API 可处理 POST 请求
           for i in {1..10}; do
             if curl -s -X POST "http://127.0.0.1:9880/tts" \
               -H "Content-Type: application/json" \
               -d '{"text":"test","text_lang":"zh"}' --max-time 5 > /dev/null 2>&1; then
-              echo "API 已就绪"
-              break
+              echo "API 已就绪"; break
             fi
             sleep 2
           done
@@ -240,7 +257,7 @@ jobs:
             echo "警告：音频时长过短 (${DURATION}s)"
           fi
 
-      - name: 转码 MP3 并发布
+      - name: 转码 MP3
         run: |
           ffmpeg -i ./output.wav -codec:a libmp3lame -q:a 2 ./output.mp3 -y
           [ -s ./output.mp3 ] || { echo "MP3 转码失败"; exit 1; }
