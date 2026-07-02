@@ -10,27 +10,28 @@ on:
         type: string
 
 jobs:
-  build:
+  # Job 1: 准备环境与模型 (负责下载和缓存所有依赖)
+  prepare:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
+    outputs:
+      # 将模型路径传递给下一个 Job
+      GPT_MODEL_PATH: ${{ steps.set-paths.outputs.GPT_MODEL_PATH }}
+      SOVITS_MODEL_PATH: ${{ steps.set-paths.outputs.SOVITS_MODEL_PATH }}
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      # ---------- 系统依赖 ----------
       - name: 安装系统依赖
         run: |
           sudo apt update
           sudo apt install -y ffmpeg git
 
-      # ---------- Python 环境 ----------
       - name: 设置 Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
+      # 缓存 pip 包，加速后续安装
       - name: 缓存 pip 包
         uses: actions/cache@v4
         with:
@@ -41,12 +42,12 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/RVC-Boss/GPT-SoVITS.git
           cd GPT-SoVITS
-          # 安装 CPU 版本的 PyTorch[reference:6]
+          # 安装 CPU 版本的 PyTorch
           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
 
-      # ---------- 下载模型 ----------
-      - name: 下载 GPT 模型 (.ckpt)
+      # 缓存 GPT 模型 (.ckpt)
+      - name: 缓存 GPT 模型
         id: cache-gpt
         uses: actions/cache@v4
         with:
@@ -59,7 +60,8 @@ jobs:
           wget -q --show-progress -O ./GPT-SoVITS/huangquan-e10.ckpt \
             https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan-e10.ckpt
 
-      - name: 下载 SoVITS 模型 (.pth)
+      # 缓存 SoVITS 模型 (.pth)
+      - name: 缓存 SoVITS 模型
         id: cache-sovits
         uses: actions/cache@v4
         with:
@@ -72,36 +74,113 @@ jobs:
           wget -q --show-progress -O ./GPT-SoVITS/huangquan_e10_s170.pth \
             https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan_e10_s170.pth
 
-      # ---------- 修改配置，强制使用 CPU ----------
-      - name: 修改配置以使用 CPU
+      # 设置输出路径，供后续 Job 使用
+      - name: 设置模型路径
+        id: set-paths
         run: |
-          cd GPT-SoVITS
-          # 在 config.py 中，将 use_cuda 设置为 False[reference:7]
-          sed -i 's/use_cuda = True/use_cuda = False/g' config.py
+          echo "GPT_MODEL_PATH=$(pwd)/GPT-SoVITS/huangquan-e10.ckpt" >> $GITHUB_OUTPUT
+          echo "SOVITS_MODEL_PATH=$(pwd)/GPT-SoVITS/huangquan_e10_s170.pth" >> $GITHUB_OUTPUT
 
-      # ---------- 运行 TTS 推理 ----------
-      - name: 运行 TTS 合成
+  # Job 2: 运行 TTS 推理 (依赖 Job 1 的缓存)
+  tts:
+    runs-on: ubuntu-latest
+    needs: prepare
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt update
+          sudo apt install -y ffmpeg git
+
+      - name: 设置 Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # 恢复 pip 缓存
+      - name: 恢复 pip 包缓存
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-cache-${{ runner.os }}-v1
+
+      - name: 克隆 GPT-SoVITS 仓库并安装依赖
+        run: |
+          git clone --depth=1 https://github.com/RVC-Boss/GPT-SoVITS.git
+          cd GPT-SoVITS
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      # 恢复模型缓存 (直接复用 prepare job 下载的文件)
+      - name: 恢复 GPT 模型缓存
+        uses: actions/cache@v4
+        with:
+          path: ./GPT-SoVITS/huangquan-e10.ckpt
+          key: huangquan-gpt-v1
+
+      - name: 恢复 SoVITS 模型缓存
+        uses: actions/cache@v4
+        with:
+          path: ./GPT-SoVITS/huangquan_e10_s170.pth
+          key: huangquan-sovits-v1
+
+      - name: 启动 API 服务并合成语音
         env:
           TEXT: ${{ inputs.text }}
+          GPT_PATH: ${{ needs.prepare.outputs.GPT_MODEL_PATH }}
+          SOVITS_PATH: ${{ needs.prepare.outputs.SOVITS_MODEL_PATH }}
         run: |
           cd GPT-SoVITS
-          python inference_main.py \
-            --model_path ./huangquan-e10.ckpt \
-            --sovits_path ./huangquan_e10_s170.pth \
-            --text "$TEXT" \
-            --output_path ../output.wav
+          # 后台启动 API 服务 (CPU 模式)
+          python api.py -s "$SOVITS_PATH" -g "$GPT_PATH" -d cpu -p 9880 &
+          
+          # 等待服务启动
+          echo "等待 API 服务启动..."
+          for i in {1..60}; do
+            if curl -s http://127.0.0.1:9880/ > /dev/null; then
+              echo "API 服务已就绪"
+              break
+            fi
+            sleep 1
+          done
+          
+          # 调用 API 合成语音 (使用官方 / 端点)
+          curl -X GET "http://127.0.0.1:9880/?text=$TEXT&text_lang=zh" \
+            --output ../output.wav
+          
+          # 停止 API 服务
+          pkill -f "api.py" || true
 
-      # ---------- 转码为 MP3 ----------
+      # 转码为 MP3 (作为 GitHub Actions 的 artifact 上传)
       - name: 转码为 MP3
         run: |
           if [ ! -f ./output.wav ] || [ ! -s ./output.wav ]; then
             echo "错误：合成未生成有效的输出文件" && exit 1
           fi
-          echo "转换 WAV 为 MP3..."
           ffmpeg -i ./output.wav -codec:a libmp3lame -q:a 2 ./output.mp3 -y
-          ls -lh ./output.mp3
 
-      # ---------- 发布 Release ----------
+      # 上传音频文件作为 artifact，供后续 Job 下载
+      - name: 上传音频文件 (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-voice
+          path: ./output.mp3
+
+  # Job 3: 发布 Release (独立运行，下载 artifact 并发布)
+  release:
+    runs-on: ubuntu-latest
+    needs: tts
+    permissions:
+      contents: write
+    steps:
+      - name: 下载音频文件 (Artifact)
+        uses: actions/download-artifact@v4
+        with:
+          name: generated-voice
+          path: ./
+
       - name: 生成版本号
         env:
           TEXT: ${{ inputs.text }}
