@@ -20,11 +20,10 @@ on:
           - 难过
 
 jobs:
-  # ==================== Job 1：环境准备（一次性缓存） ====================
+  # ==================== Job 1：一次性准备环境并缓存 ====================
   prepare:
     runs-on: ubuntu-latest
     steps:
-      # ---------- 尝试恢复已有缓存 ----------
       - name: 恢复环境缓存
         id: cache-env
         uses: actions/cache/restore@v4
@@ -32,40 +31,42 @@ jobs:
           path: |
             ./GPT-SoVITS
             ./venv
-          key: tts-env-v1-${{ inputs.emotion }}
+          key: tts-env-v2-${{ inputs.emotion }}
 
-      # 若缓存命中，直接结束（无需任何操作）
-      - name: 缓存已就绪
+      - name: 缓存已命中，跳过准备
         if: steps.cache-env.outputs.cache-hit == 'true'
-        run: echo "环境缓存已命中，跳过准备步骤。"
+        run: echo "环境缓存已命中，无需重新准备。"
 
-      # ========== 以下步骤仅在缓存未命中时执行 ==========
-      - name: 安装基础工具（缓存缺失）
+      # ========== 以下仅在缓存未命中时执行 ==========
+      - name: 安装基础工具
         if: steps.cache-env.outputs.cache-hit != 'true'
         run: sudo apt update && sudo apt install -y git git-lfs curl
 
-      - name: 设置 Python 3.10（缓存缺失）
+      - name: 设置 Python 3.10
         if: steps.cache-env.outputs.cache-hit != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: 克隆 GPT-SoVITS 仓库（缓存缺失）
+      - name: 克隆 GPT-SoVITS 仓库
         if: steps.cache-env.outputs.cache-hit != 'true'
         run: git clone --depth=1 https://github.com/RVC-Boss/GPT-SoVITS.git
 
-      - name: 创建虚拟环境并安装依赖（缓存缺失）
+      - name: 创建虚拟环境并安装依赖
         if: steps.cache-env.outputs.cache-hit != 'true'
         run: |
           python -m venv venv
           source venv/bin/activate
           cd GPT-SoVITS
+          # 去除 torch 相关行，避免与后续 CPU 版冲突
           grep -v 'torch' requirements.txt > requirements-no-torch.txt || true
           pip install -r requirements-no-torch.txt
-          pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          # 安装官方推荐的 PyTorch 版本 (CPU)
+          pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
+          # 额外依赖（GPT-SoVITS 需要 transformers 加载 BERT）
           pip install huggingface_hub transformers pyyaml
 
-      - name: 下载预训练模型（缓存缺失）
+      - name: 下载预训练模型
         if: steps.cache-env.outputs.cache-hit != 'true'
         run: |
           cd GPT-SoVITS
@@ -73,25 +74,24 @@ jobs:
           git lfs install
           git clone --depth=1 https://huggingface.co/hfl/chinese-roberta-wwm-ext-large pretrained_models/chinese-roberta-wwm-ext-large
           git clone --depth=1 https://huggingface.co/TencentGameMate/chinese-hubert-base pretrained_models/chinese-hubert-base
-          # 用 curl 代替 wget，支持重试和断点续传
           curl -L --retry 5 --retry-delay 5 -C - -o pretrained_models/s1v3.ckpt \
             https://huggingface.co/RVC-Boss/GPT-SoVITS/resolve/main/pretrained_models/s1v3.ckpt
           curl -L --retry 5 --retry-delay 5 -C - -o pretrained_models/s2G2333k.pth \
             https://huggingface.co/RVC-Boss/GPT-SoVITS/resolve/main/pretrained_models/s2G2333k.pth
 
-      - name: 下载黄泉 GPT 模型（缓存缺失）
+      - name: 下载黄泉 GPT 模型
         if: steps.cache-env.outputs.cache-hit != 'true'
         run: |
           curl -L --retry 5 --retry-delay 5 -C - -o GPT-SoVITS/huangquan-e10.ckpt \
             https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan-e10.ckpt
 
-      - name: 下载黄泉 SoVITS 模型（缓存缺失）
+      - name: 下载黄泉 SoVITS 模型
         if: steps.cache-env.outputs.cache-hit != 'true'
         run: |
           curl -L --retry 5 --retry-delay 5 -C - -o GPT-SoVITS/huangquan_e10_s170.pth \
             https://github.com/yingo-server/Huang-Quan/releases/download/Source/huangquan_e10_s170.pth
 
-      - name: 下载参考音频（缓存缺失）
+      - name: 下载参考音频
         if: steps.cache-env.outputs.cache-hit != 'true'
         run: |
           cd GPT-SoVITS
@@ -118,23 +118,23 @@ jobs:
           if [ ! -s reference_audio/ref.wav ]; then echo "参考音频下载失败" && exit 1; fi
           echo "$REF_TEXT" > reference_audio/ref_text.txt
 
-      - name: 保存环境缓存（缓存缺失时）
+      - name: 保存环境缓存
         if: steps.cache-env.outputs.cache-hit != 'true' && success()
         uses: actions/cache/save@v4
         with:
           path: |
             ./GPT-SoVITS
             ./venv
-          key: tts-env-v1-${{ inputs.emotion }}
+          key: tts-env-v2-${{ inputs.emotion }}
 
-  # ==================== Job 2：合成与发布（独立，失败不影响缓存） ====================
+  # ==================== Job 2：合成（独立，失败不影响缓存） ====================
   synthesize:
     needs: prepare
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: 安装合成系统依赖
+      - name: 安装系统依赖
         run: sudo apt update && sudo apt install -y ffmpeg bc curl
 
       - name: 恢复环境缓存
@@ -143,7 +143,7 @@ jobs:
           path: |
             ./GPT-SoVITS
             ./venv
-          key: tts-env-v1-${{ inputs.emotion }}
+          key: tts-env-v2-${{ inputs.emotion }}
 
       - name: 读取参考文本
         run: |
@@ -152,7 +152,7 @@ jobs:
           echo "$REF_TEXT" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      - name: 生成 TTS 配置文件
+      - name: 生成 TTS 配置
         run: |
           cd GPT-SoVITS
           mkdir -p configs
@@ -180,7 +180,7 @@ jobs:
               yaml.dump(config, f, allow_unicode=True)
           "
 
-      - name: 启动 API 并合成语音
+      - name: 合成语音
         env:
           TEXT: ${{ inputs.text }}
         run: |
@@ -214,7 +214,7 @@ jobs:
             echo "警告：音频时长过短 (${DURATION}s)"
           fi
 
-      - name: 转码为 MP3
+      - name: 转码 MP3
         run: |
           ffmpeg -i ./output.wav -codec:a libmp3lame -q:a 2 ./output.mp3 -y
           [ -s ./output.mp3 ] || { echo "MP3 转码失败"; exit 1; }
@@ -225,7 +225,7 @@ jobs:
           name: generated-voice
           path: ./output.mp3
 
-      - name: 生成安全 Tag 并发布 Release
+      - name: 生成 Tag 并发布 Release
         env:
           TEXT: ${{ inputs.text }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
