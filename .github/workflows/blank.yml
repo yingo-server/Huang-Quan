@@ -25,14 +25,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 安装基础工具
-        run: sudo apt update && sudo apt install -y git git-lfs curl python3.10-venv
+        run: sudo apt update && sudo apt install -y git git-lfs curl
+
+      - name: 设置 Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
       - name: 克隆 GPT-SoVITS 仓库
         run: git clone --depth=1 https://github.com/RVC-Boss/GPT-SoVITS.git
 
       - name: 创建虚拟环境并安装 Python 依赖
         run: |
-          python3.10 -m venv venv
+          python -m venv venv
           source venv/bin/activate
           cd GPT-SoVITS
           # 先安装除 torch 外的包，防止被覆盖
@@ -83,7 +88,6 @@ jobs:
           if [ ! -s reference_audio/ref.wav ]; then echo "参考音频下载失败" && exit 1; fi
           echo "$REF_TEXT" > reference_audio/ref_text.txt
 
-      # 只有以上步骤全部成功，才保存缓存（使用静态 key，避免 hashFiles 缺失）
       - name: 保存完整环境缓存
         if: success()
         uses: actions/cache/save@v4
@@ -165,7 +169,6 @@ jobs:
             echo "API 启动失败"; cat api.log; exit 1
           fi
 
-          # 使用 Python 安全构造 JSON，防止注入
           JSON=$(python -c "import json, sys; print(json.dumps({'text': sys.argv[1], 'text_lang': 'zh'}))" "$TEXT")
           curl -X POST "http://127.0.0.1:9880/tts" \
             -H "Content-Type: application/json" \
